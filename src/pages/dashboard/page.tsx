@@ -9,7 +9,7 @@ import { AddAccountModal } from './components/AddAccountModal';
 import { useDashboard } from '@/hooks/useDashboard';
 
 export default function Dashboard() {
-  const [activeNav, setActiveNav] = useState('inbox');
+  const [activeNav, setActiveNav] = useState('dashboard');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [fixPasswordId, setFixPasswordId] = useState<string | null>(null);
@@ -201,7 +201,7 @@ export default function Dashboard() {
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
                   <div className="lg:col-span-2 space-y-5">
-                    <RecentEmails emails={recentEmails} />
+                    <RecentEmails emails={recentEmails} emailAccounts={emailAccounts} />
                     <EmailAccountsList
                       accounts={emailAccounts}
                       onAddAccount={() => setIsModalOpen(true)}
@@ -221,10 +221,6 @@ export default function Dashboard() {
                         <div className="flex items-center justify-between">
                           <span className="text-xs text-foreground-500">Emails Today</span>
                           <span className="text-sm font-semibold text-foreground-950">{stats.totalEmailsToday}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-foreground-500">Avg Response Time</span>
-                          <span className="text-sm font-semibold text-foreground-950">{stats.avgResponseTime}</span>
                         </div>
                         <div className="flex items-center justify-between">
                           <span className="text-xs text-foreground-500">AI Actions</span>

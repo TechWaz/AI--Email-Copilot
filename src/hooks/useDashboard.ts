@@ -9,11 +9,12 @@ export interface DashboardStats {
   aiActionsToday: number;
   syncedAccounts: number;
   totalEmailsToday: number;
-  avgResponseTime: string;
 }
 
 export interface RecentEmail {
   id: string;
+  account_id: string | null;
+  account_email: string | null;
   sender_name: string | null;
   sender_email: string | null;
   subject: string | null;
@@ -73,7 +74,6 @@ const defaultStats: DashboardStats = {
   aiActionsToday: 0,
   syncedAccounts: 0,
   totalEmailsToday: 0,
-  avgResponseTime: '0 min',
 };
 
 function getStartOfDay(): string {
@@ -124,7 +124,7 @@ export function useDashboard() {
       const user = authData?.user;
       if (authErr || !user) {
         console.warn('No authenticated user found when fetching email accounts');
-        return { accounts: [], authFailed: true };
+        return { accounts: [], user: null, authFailed: true };
       }
 
       const { data, error } = await supabase
@@ -135,14 +135,14 @@ export function useDashboard() {
 
       if (error) {
         console.error('Email accounts fetch error:', error.message);
-        return { accounts: [], authFailed: false };
+        return { accounts: [], user, authFailed: false };
       }
 
       console.log('Email accounts fetched:', data?.length || 0, 'rows');
-      return { accounts: (data as EmailAccount[]) || [], authFailed: false };
+      return { accounts: (data as EmailAccount[]) || [], user, authFailed: false };
     } catch (err) {
       console.error('Email accounts fetch exception:', err);
-      return { accounts: [], authFailed: false };
+      return { accounts: [], user: null, authFailed: false };
     }
   }, []);
 
@@ -156,7 +156,7 @@ export function useDashboard() {
     try {
       const today = getStartOfDay();
 
-      const { accounts: emailAccounts, authFailed } = await fetchEmailAccounts();
+      const { accounts: emailAccounts, user, authFailed } = await fetchEmailAccounts();
       if (authFailed) {
         setState((prev) => ({
           ...prev,
@@ -181,25 +181,27 @@ export function useDashboard() {
       ] = await Promise.all([
         supabase.from('emails').select('*', { count: 'exact', head: true }).eq('is_read', false),
         supabase.from('emails').select('*', { count: 'exact', head: true }).eq('action_required', true),
-        supabase.from('tasks').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
-        supabase.from('reminders').select('*', { count: 'exact', head: true }).gte('reminder_date', today).eq('status', 'active'),
+        supabase.from('tasks').select('*', { count: 'exact', head: true }).eq('user_id', user!.id).eq('status', 'pending'),
+        supabase.from('reminders').select('*', { count: 'exact', head: true }).eq('user_id', user!.id).gte('reminder_date', today).eq('status', 'active'),
         supabase.from('ai_logs').select('*', { count: 'exact', head: true }).gte('created_at', today),
         supabase.from('emails').select('*', { count: 'exact', head: true }).gte('received_at', today),
         supabase.from('emails')
-          .select('id, sender_name, sender_email, subject, body_text, received_at, is_read, importance_score, ai_category, ai_summary, action_required')
+          .select('id, account_id, sender_name, sender_email, subject, body_text, received_at, is_read, importance_score, ai_category, ai_summary, action_required')
           .order('received_at', { ascending: false })
           .limit(10),
         supabase.from('tasks')
           .select('id, title, description, due_date, priority, status')
+          .eq('user_id', user!.id)
           .eq('status', 'pending')
           .order('due_date', { ascending: true })
-          .limit(6),
+          .limit(50),
         supabase.from('reminders')
           .select('id, title, reminder_date, email_id')
+          .eq('user_id', user!.id)
           .eq('status', 'active')
           .gte('reminder_date', today)
           .order('reminder_date', { ascending: true })
-          .limit(5),
+          .limit(50),
       ]);
 
       const errors = [unreadErr, replyErr, tasksErr, remindersErr, aiErr, todayEmailsErr, emailsErr, tasksDataErr, remindersDataErr].filter(Boolean);
@@ -216,12 +218,17 @@ export function useDashboard() {
         aiActionsToday: aiCount ?? 0,
         syncedAccounts: emailAccounts.length,
         totalEmailsToday: todayEmailsCount ?? 0,
-        avgResponseTime: '2.4 min',
       };
+
+      const accountMap = new Map(emailAccounts.map(a => [a.id, a.email_address]));
+      const recentEmails: RecentEmail[] = ((emailsData as Array<RecentEmail & { account_id: string }>) || []).map(row => ({
+        ...row,
+        account_email: accountMap.get(row.account_id ?? '') ?? null,
+      }));
 
       setState({
         stats,
-        recentEmails: (emailsData as RecentEmail[]) || [],
+        recentEmails,
         pendingTasks: (tasksData as PendingTask[]) || [],
         upcomingReminders: (remindersData as UpcomingReminder[]) || [],
         emailAccounts,
@@ -420,7 +427,7 @@ export function useDashboard() {
 
       // Refresh account list so the UI picks up sync_status="error" from the DB
       try {
-        const accounts = await fetchEmailAccounts();
+        const { accounts } = await fetchEmailAccounts();
         setState((prev) => ({ ...prev, emailAccounts: accounts }));
       } catch {
         // Non-critical — the sync error is already displayed

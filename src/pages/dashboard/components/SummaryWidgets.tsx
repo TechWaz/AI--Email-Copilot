@@ -68,8 +68,8 @@ export function SummaryWidgets({ stats }: SummaryWidgetsProps) {
               <i className={`${stat.icon} ${stat.color} text-lg`}></i>
             </div>
           </div>
-          <p className="text-2xl font-semibold text-foreground-950 mb-0.5">{stat.value}</p>
-          <p className="text-xs text-foreground-500">{stat.label}</p>
+<p className="text-3xl font-semibold text-foreground-950 mb-1">{stat.value}</p>
+<p className="text-sm text-foreground-500">{stat.label}</p>
         </div>
       ))}
     </div>

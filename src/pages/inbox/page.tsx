@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { FolderSidebar } from './components/FolderSidebar';
 import { InboxTopBar } from './components/InboxTopBar';
 import { EmailList } from './components/EmailList';
@@ -8,6 +9,7 @@ import { ComposeModal } from './components/ComposeModal';
 import { useInbox, type InboxEmail } from '@/hooks/useInbox';
 
 export default function Inbox() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [replyMode, setReplyMode] = useState<'reply' | 'replyAll' | 'forward' | null>(null);
   const [replyEmail, setReplyEmail] = useState<InboxEmail | null>(null);
   const [isComposeOpen, setIsComposeOpen] = useState(false);
@@ -16,6 +18,8 @@ export default function Inbox() {
     emails,
     sentEmails,
     accounts,
+    selectedAccountId,
+    setSelectedAccountId,
     selectedEmail,
     folder,
     filterTab,
@@ -75,6 +79,17 @@ export default function Inbox() {
     }
   }, [sendSuccess, replyMode, isComposeOpen]);
 
+  // Deep-link: auto-open a specific email when arriving from dashboard
+  useEffect(() => {
+    const targetId = searchParams.get('emailId');
+    if (!targetId || isLoading) return;
+    const match = emails.find(e => e.id === targetId);
+    if (match) {
+      selectEmail(match);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, emails, isLoading, selectEmail, setSearchParams]);
+
   const unreadCount = emails.filter((e) => !e.is_read).length;
   const sentCount = sentEmails.filter((e) => !e.is_draft).length;
   const draftCount = sentEmails.filter((e) => e.is_draft).length;
@@ -113,7 +128,13 @@ export default function Inbox() {
 
       {/* Main area */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <InboxTopBar searchQuery={searchQuery} onSearchChange={setSearchQuery} />
+        <InboxTopBar
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          accounts={accounts}
+          selectedAccountId={selectedAccountId}
+          onAccountChange={setSelectedAccountId}
+        />
 
         {/* Inbox content */}
         <div className="flex-1 flex overflow-hidden">

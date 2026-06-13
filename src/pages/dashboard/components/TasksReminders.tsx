@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { PendingTask, UpcomingReminder } from '@/hooks/useDashboard';
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -6,17 +8,28 @@ const PRIORITY_COLORS: Record<string, string> = {
   low: 'text-foreground-500 bg-background-100',
 };
 
+const INITIAL_TASK_LIMIT = 5;
+const INITIAL_REMINDER_LIMIT = 5;
+
 interface TasksPanelProps {
   tasks: PendingTask[];
 }
 
 export function TasksPanel({ tasks }: TasksPanelProps) {
+  const navigate = useNavigate();
+  const visible = tasks.slice(0, INITIAL_TASK_LIMIT);
+  const hasMore = tasks.length > INITIAL_TASK_LIMIT;
+
   return (
     <div className="bg-white rounded-xl border border-background-200 overflow-hidden">
       <div className="px-5 py-3.5 border-b border-background-200 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-foreground-950">Pending Tasks</h3>
-        <button className="text-xs text-foreground-500 hover:text-primary-500 transition-colors cursor-pointer whitespace-nowrap">
-          View All
+        <button
+          onClick={() => navigate('/tasks')}
+          className="text-xs text-foreground-500 hover:text-primary-500 transition-colors cursor-pointer whitespace-nowrap flex items-center gap-1"
+        >
+          {hasMore ? `View All (${tasks.length})` : 'Manage Tasks'}
+          <i className="ri-arrow-right-line text-xs"></i>
         </button>
       </div>
       <div className="divide-y divide-background-100">
@@ -25,7 +38,7 @@ export function TasksPanel({ tasks }: TasksPanelProps) {
             No pending tasks.
           </div>
         )}
-        {tasks.map((task) => (
+        {visible.map((task) => (
           <div key={task.id} className="px-5 py-3 hover:bg-background-50 transition-colors cursor-pointer flex items-center gap-3">
             <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 ${
               task.status === 'completed'
@@ -57,13 +70,22 @@ interface RemindersPanelProps {
 }
 
 export function RemindersPanel({ reminders }: RemindersPanelProps) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? reminders : reminders.slice(0, INITIAL_REMINDER_LIMIT);
+  const hasMore = reminders.length > INITIAL_REMINDER_LIMIT;
+
   return (
     <div className="bg-white rounded-xl border border-background-200 overflow-hidden">
       <div className="px-5 py-3.5 border-b border-background-200 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-foreground-950">Upcoming Reminders</h3>
-        <button className="text-xs text-foreground-500 hover:text-primary-500 transition-colors cursor-pointer whitespace-nowrap">
-          View All
-        </button>
+        {hasMore && (
+          <button
+            onClick={() => setExpanded(v => !v)}
+            className="text-xs text-foreground-500 hover:text-primary-500 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            {expanded ? 'Show Less' : `View All (${reminders.length})`}
+          </button>
+        )}
       </div>
       <div className="divide-y divide-background-100">
         {reminders.length === 0 && (
@@ -71,7 +93,7 @@ export function RemindersPanel({ reminders }: RemindersPanelProps) {
             No upcoming reminders.
           </div>
         )}
-        {reminders.map((reminder) => {
+        {visible.map((reminder) => {
           const date = new Date(reminder.reminder_date);
           const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
           const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });

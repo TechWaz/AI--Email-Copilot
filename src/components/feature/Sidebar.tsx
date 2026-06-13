@@ -4,12 +4,10 @@ import { useAuth } from '@/hooks/useAuth';
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: 'ri-dashboard-line', path: '/dashboard' },
   { id: 'inbox', label: 'Inbox', icon: 'ri-mail-line', path: '/inbox' },
-  { id: 'priority', label: 'Priority', icon: 'ri-star-line', path: '/dashboard' },
-  { id: 'tasks', label: 'Tasks', icon: 'ri-task-line', path: '/dashboard' },
-  { id: 'accounts', label: 'Accounts', icon: 'ri-mail-settings-line', path: '/dashboard' },
-  { id: 'reminders', label: 'Reminders', icon: 'ri-timer-line', path: '/dashboard' },
-  { id: 'search', label: 'Search', icon: 'ri-search-line', path: '/dashboard' },
-  { id: 'settings', label: 'Settings', icon: 'ri-settings-3-line', path: '/dashboard' },
+  { id: 'tasks', label: 'Tasks', icon: 'ri-task-line', path: '/tasks' },
+  { id: 'accounts', label: 'Accounts', icon: 'ri-mail-settings-line', path: '/accounts' },
+  { id: 'search', label: 'Search', icon: 'ri-search-line', path: '/search' },
+  { id: 'settings', label: 'Settings', icon: 'ri-settings-3-line', path: '/settings' },
 ];
 
 interface SidebarProps {

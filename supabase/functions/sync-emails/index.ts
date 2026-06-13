@@ -16,6 +16,7 @@ interface EmailAccount {
   imap_host: string;
   imap_port: number;
   encrypted_password: string;
+  last_sync: string | null;
 }
 
 function decodeBase64(raw: string): string {
@@ -38,6 +39,48 @@ function decodeContent(raw: string, encoding: string): string {
   if (encoding === "base64") return decodeBase64(raw);
   if (encoding === "quoted-printable") return decodeQuotedPrintable(raw);
   return raw;
+}
+
+// RFC 2047 encoded-word decoder: handles =?charset?B?...?= and =?charset?Q?...?=
+function decodeEncodedWord(header: string): string {
+  // Strip whitespace between adjacent encoded words before decoding
+  const joined = header.replace(/(=\?[^?]+\?[BbQq]\?[^?]*\?=)\s+(=\?[^?]+\?[BbQq]\?[^?]*\?=)/g, "$1$2");
+  return joined.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (orig, charset: string, enc: string, text: string) => {
+    try {
+      let bytes: Uint8Array;
+      if (enc.toUpperCase() === "B") {
+        bytes = Uint8Array.from(atob(text.replace(/\s/g, "")), (c) => c.charCodeAt(0));
+      } else {
+        // Quoted-printable: underscore = space
+        const raw = text.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+        bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
+      }
+      return new TextDecoder(charset.toLowerCase(), { fatal: false }).decode(bytes);
+    } catch {
+      return orig;
+    }
+  });
+}
+
+// Strip <style>/<script>/<head> blocks, decode common entities, then strip remaining tags
+function htmlToText(html: string): string {
+  return html
+    .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&zwnj;/gi, "")
+    .replace(/&#847;/g, "")
+    .replace(/&#8199;/g, " ")
+    .replace(/&#65279;/g, "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 interface ParsedEmail {
@@ -133,19 +176,19 @@ function parseEmail(raw: string): ParsedEmail {
   }
 
   if (!bodyText && bodyHtml) {
-    bodyText = bodyHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    bodyText = htmlToText(bodyHtml);
   }
 
   return {
     messageId: headers["message-id"]?.replace(/[<>]/g, "") || "",
     inReplyTo: headers["in-reply-to"]?.replace(/[<>]/g, "") || null,
     references: headers["references"]?.replace(/[<>]/g, "") || null,
-    fromName: from.name,
+    fromName: decodeEncodedWord(from.name),
     fromEmail: from.email,
     toEmail: to.email,
     cc: headers["cc"] || null,
     bcc: headers["bcc"] || null,
-    subject: headers["subject"] || "(No Subject)",
+    subject: decodeEncodedWord(headers["subject"] || "(No Subject)"),
     date: headers["date"] || new Date().toISOString(),
     bodyText,
     bodyHtml,
@@ -173,14 +216,35 @@ function categorizeEmail(subject: string, bodyText: string): string {
   return "General";
 }
 
-function estimateImportance(subject: string): number {
+function estimateImportance(subject: string, bodyText: string, category: string): { score: number; actionRequired: boolean } {
   let score = 5;
-  const lower = subject.toLowerCase();
-  const highPriority = ["urgent", "asap", "critical", "important", "action required", "deadline", "overdue"];
-  const lowPriority = ["newsletter", "promo", "spam", "update", "digest", "weekly", "monthly", "notification"];
-  for (const kw of highPriority) { if (lower.includes(kw)) { score += 3; break; } }
-  for (const kw of lowPriority) { if (lower.includes(kw)) { score -= 2; break; } }
-  return Math.max(1, Math.min(10, score));
+  const subjectLower = subject.toLowerCase();
+  const combinedLower = (subject + " " + bodyText.slice(0, 1000)).toLowerCase();
+
+  const criticalSubject = ["urgent", "asap", "critical", "emergency", "immediate action", "action required", "deadline", "overdue", "past due", "final notice", "last chance", "expiring"];
+  const highSubject = ["important", "follow up", "follow-up", "reminder", "please review", "please respond", "response needed", "approval needed", "invoice due", "payment due"];
+  const lowKeywords = ["newsletter", "promo", "promotion", "unsubscribe", "digest", "weekly", "monthly", "notification", "no-reply", "noreply", "automated", "subscription", "offer", "deal", "sale"];
+
+  for (const kw of criticalSubject) { if (subjectLower.includes(kw)) { score += 4; break; } }
+  for (const kw of highSubject) { if (subjectLower.includes(kw)) { score += 2; break; } }
+  for (const kw of lowKeywords) { if (combinedLower.includes(kw)) { score -= 3; break; } }
+
+  // Category-based adjustment
+  if (["Finance", "Security", "Client", "Support"].includes(category)) score += 2;
+  if (["Marketing", "Social"].includes(category)) score -= 2;
+
+  // Detect action required from body
+  const actionPhrases = ["please reply", "please respond", "let me know", "your response", "response required", "action required", "please confirm", "approval needed", "please sign", "complete by", "due by", "please review and", "kindly revert", "awaiting your"];
+  let actionRequired = false;
+  for (const kw of actionPhrases) {
+    if (combinedLower.includes(kw)) {
+      actionRequired = true;
+      score += 1;
+      break;
+    }
+  }
+
+  return { score: Math.max(1, Math.min(10, score)), actionRequired };
 }
 
 function buildImapCommand(tag: string, command: string): Uint8Array {
@@ -188,9 +252,27 @@ function buildImapCommand(tag: string, command: string): Uint8Array {
   return encoder.encode(`${tag} ${command}\r\n`);
 }
 
-async function imapSync(host: string, port: number, email: string, password: string): Promise<{ rawEmails: string[]; errors: string[]; total: number }> {
+interface FetchedEmail {
+  raw: string;
+  isSeen: boolean;
+}
+
+interface SeenUpdate {
+  messageId: string;
+  isSeen: boolean;
+}
+
+// knownMessageIds: message IDs already in DB (skip full-body download for these)
+async function imapSync(
+  host: string,
+  port: number,
+  email: string,
+  password: string,
+  knownMessageIds: Set<string>,
+): Promise<{ rawEmails: FetchedEmail[]; seenUpdates: SeenUpdate[]; errors: string[]; total: number }> {
   const errors: string[] = [];
-  const rawEmails: string[] = [];
+  const rawEmails: FetchedEmail[] = [];
+  const seenUpdates: SeenUpdate[] = [];
   let tagSeq = 0;
   const decoder = new TextDecoder();
 
@@ -312,43 +394,115 @@ async function imapSync(host: string, port: number, email: string, password: str
       const logoutTag = await sendCmd("LOGOUT");
       await readUntilTag(logoutTag);
     } catch { /* ignore */ }
-    return { rawEmails: [], errors: [], total: 0 };
+    return { rawEmails: [], seenUpdates: [], errors: [], total: 0 };
   }
 
+  // Always SEARCH ALL — two-pass header scan is cheap and ensures gradual backfill
   const searchTag = await sendCmd("SEARCH ALL");
   const searchResp = await readUntilTag(searchTag);
-  let seqNums: number[] = [];
+  let allSeqNums: number[] = [];
   for (const line of searchResp.lines) {
     if (line.startsWith("* SEARCH")) {
       const nums = line.replace("* SEARCH", "").trim();
       if (nums) {
-        const all = nums.split(/\s+/).map(Number).filter((n) => !isNaN(n));
-        seqNums = all.slice(-Math.min(50, all.length));
+        allSeqNums = nums.split(/\s+/).map(Number).filter((n) => !isNaN(n));
       }
     }
   }
 
-  const total = seqNums.length;
-  console.log(`[IMAP] Fetching ${total} emails...`);
+  const total = allSeqNums.length;
+  // Scan the most recent 500 emails for headers each run (lightweight: just Message-IDs)
+  const SCAN_LIMIT = 500;
+  const seqNums = allSeqNums.slice(-Math.min(SCAN_LIMIT, allSeqNums.length));
+  console.log(`[IMAP] ${total} total, scanning ${seqNums.length} headers this run...`);
 
-  for (const seqNum of seqNums) {
+  // ── Pass 1: Fetch only Message-ID headers in batches to find which emails are new ──
+  const seqToMsgId = new Map<number, string>(); // seq → message-id
+  const seqToSeen = new Map<number, boolean>();  // seq → \Seen flag
+  const HEADER_BATCH = 50;
+
+  for (let i = 0; i < seqNums.length; i += HEADER_BATCH) {
+    const batch = seqNums.slice(i, i + HEADER_BATCH);
+    const range = batch.join(",");
     try {
-      const fetchTag = await sendCmd(`FETCH ${seqNum} (BODY.PEEK[])`);
+      const hTag = await sendCmd(`FETCH ${range} (FLAGS BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])`);
+      const hResp = await readMultiLineUntilTag(hTag);
+
+      let curSeq: number | null = null;
+      let curSeen = false;
+      for (const line of hResp.lines) {
+        const fetchMatch = line.match(/^\* (\d+) FETCH/i);
+        if (fetchMatch) {
+          curSeq = parseInt(fetchMatch[1]);
+          curSeen = /\\Seen/i.test(line);
+          seqToSeen.set(curSeq, curSeen);
+        }
+        // Handle flags appearing on a separate untagged line (some servers)
+        if (curSeq !== null && /FLAGS\s*\(/i.test(line) && !line.startsWith("* " + curSeq + " FETCH")) {
+          curSeen = /\\Seen/i.test(line);
+          seqToSeen.set(curSeq, curSeen);
+        }
+        const msgIdMatch = line.match(/^[Mm]essage-[Ii][Dd]:\s*<?([^>\s\r\n]+)>?/);
+        if (msgIdMatch && curSeq !== null) {
+          const mid = msgIdMatch[1].trim();
+          if (mid) {
+            seqToMsgId.set(curSeq, mid);
+          }
+        }
+      }
+    } catch (e) {
+      errors.push(`Header batch ${i / HEADER_BATCH + 1}: ${e instanceof Error ? e.message : "error"}`);
+    }
+  }
+
+  // Determine which are new vs known
+  const newSeqNums: number[] = [];
+  for (const seq of seqNums) {
+    const mid = seqToMsgId.get(seq);
+    if (!mid) {
+      // No Message-ID found in header pass — fetch full body to process it
+      newSeqNums.push(seq);
+    } else if (!knownMessageIds.has(mid)) {
+      newSeqNums.push(seq);
+    } else {
+      // Already in DB — just report any seen-flag change
+      const isSeen = seqToSeen.get(seq) ?? false;
+      seenUpdates.push({ messageId: mid, isSeen });
+    }
+  }
+
+  // Cap body fetches per run to avoid memory/timeout limit
+  const MAX_BODY_FETCH = 100;
+  const seqNumsToFetch = newSeqNums.slice(-MAX_BODY_FETCH);
+  console.log(`[IMAP] ${newSeqNums.length} new emails found, fetching ${seqNumsToFetch.length} bodies this run`);
+
+  // ── Pass 2: Full-body fetch only for new emails ──
+  for (const seqNum of seqNumsToFetch) {
+    try {
+      const fetchTag = await sendCmd(`FETCH ${seqNum} (FLAGS BODY.PEEK[])`);
       const fetchResp = await readMultiLineUntilTag(fetchTag);
       if (!fetchResp.status.includes("OK")) continue;
 
-      const prefix = `* ${seqNum} FETCH (BODY[] {`;
-      const idx = fetchResp.raw.indexOf(prefix);
-      if (idx === -1) continue;
-      const sizeEnd = fetchResp.raw.indexOf("}", idx);
+      // Parse \Seen flag
+      const fetchHeaderEnd = fetchResp.raw.indexOf("\r\n");
+      const fetchHeaderLine = fetchHeaderEnd === -1 ? fetchResp.raw : fetchResp.raw.slice(0, fetchHeaderEnd);
+      const flagsMatch = fetchHeaderLine.match(/FLAGS\s*\(([^)]*)\)/i);
+      const isSeen = flagsMatch ? flagsMatch[1].includes("\\Seen") : false;
+
+      // Locate body literal — BODY[] {size}\r\n<body>
+      const bodyLitStr = "BODY[] {";
+      const bodyLitIdx = fetchResp.raw.indexOf(bodyLitStr);
+      if (bodyLitIdx === -1) continue;
+      const sizeStart = bodyLitIdx + bodyLitStr.length;
+      const sizeEnd = fetchResp.raw.indexOf("}", sizeStart);
       if (sizeEnd === -1) continue;
-      const size = parseInt(fetchResp.raw.slice(idx + prefix.length, sizeEnd));
+      const size = parseInt(fetchResp.raw.slice(sizeStart, sizeEnd));
       if (isNaN(size)) continue;
       const bodyStart = sizeEnd + 2;
       const rawBody = fetchResp.raw.slice(bodyStart, bodyStart + size);
 
       if (rawBody.length > 0) {
-        rawEmails.push(rawBody);
+        rawEmails.push({ raw: rawBody, isSeen });
       }
     } catch (e) {
       errors.push(`Seq ${seqNum}: ${e instanceof Error ? e.message : "Unknown error"}`);
@@ -360,8 +514,8 @@ async function imapSync(host: string, port: number, email: string, password: str
     await readUntilTag(logoutTag);
   } catch { /* ignore */ }
 
-  console.log(`[IMAP] Done: ${rawEmails.length} fetched, ${errors.length} errors`);
-  return { rawEmails, errors, total };
+  console.log(`[IMAP] Done: ${rawEmails.length} new bodies fetched, ${errors.length} errors`);
+  return { rawEmails, seenUpdates, errors, total };
 }
 
 serve(async (req: Request) => {
@@ -420,7 +574,7 @@ serve(async (req: Request) => {
 
     const { data: account, error: acctErr } = await supabase
       .from("email_accounts")
-      .select("id, user_id, email_address, imap_host, imap_port, encrypted_password")
+      .select("id, user_id, email_address, imap_host, imap_port, encrypted_password, last_sync")
       .eq("id", accountId)
       .single();
 
@@ -444,6 +598,22 @@ serve(async (req: Request) => {
     // Update status to syncing
     await supabase.from("email_accounts").update({ sync_status: "syncing" }).eq("id", accountId);
 
+    // Load ALL known message IDs for this account — no time scoping, ensures dedup is correct
+    const { data: knownMsgs } = await supabase
+      .from("emails")
+      .select("message_id, id, is_read")
+      .eq("account_id", accountId)
+      .limit(5000);
+
+    const knownMessageIds = new Set<string>(
+      (knownMsgs ?? []).map((m: { message_id: string }) => m.message_id).filter(Boolean)
+    );
+    const knownMsgMap = new Map<string, { id: string; is_read: boolean }>(
+      (knownMsgs ?? [])
+        .filter((m: { message_id: string }) => !!m.message_id)
+        .map((m: { message_id: string; id: string; is_read: boolean }) => [m.message_id, { id: m.id, is_read: m.is_read }])
+    );
+
     let synced = 0;
     let total = 0;
     const dbErrors: string[] = [];
@@ -453,28 +623,33 @@ serve(async (req: Request) => {
         typedAccount.imap_host,
         typedAccount.imap_port,
         typedAccount.email_address,
-        typedAccount.encrypted_password
+        typedAccount.encrypted_password,
+        knownMessageIds,
       );
 
       total = result.total;
       dbErrors.push(...result.errors);
 
-      for (const raw of result.rawEmails) {
+      // Batch-update is_read for emails whose \Seen flag changed on the server
+      for (const { messageId, isSeen } of result.seenUpdates) {
+        const existing = knownMsgMap.get(messageId);
+        if (existing && existing.is_read !== isSeen) {
+          await supabase.from("emails").update({ is_read: isSeen }).eq("id", existing.id);
+        }
+      }
+
+      for (const { raw, isSeen } of result.rawEmails) {
         try {
           const parsed = parseEmail(raw);
 
-          if (parsed.messageId) {
-            const { data: existing } = await supabase
-              .from("emails")
-              .select("id")
-              .eq("message_id", parsed.messageId)
-              .maybeSingle();
-            if (existing) continue;
+          // Skip if we somehow already have it (shouldn't happen after two-pass filter)
+          if (parsed.messageId && knownMessageIds.has(parsed.messageId)) {
+            continue;
           }
 
           const threadId = deriveThreadId(parsed.messageId, parsed.inReplyTo, parsed.references);
           const category = categorizeEmail(parsed.subject, parsed.bodyText);
-          const importance = estimateImportance(parsed.subject);
+          const { score: importance, actionRequired } = estimateImportance(parsed.subject, parsed.bodyText, category);
 
           let receivedAt: string;
           try {
@@ -497,13 +672,17 @@ serve(async (req: Request) => {
             body_text: parsed.bodyText || null,
             body_html: parsed.bodyHtml || null,
             received_at: receivedAt,
-            is_read: false,
+            is_read: isSeen,
             importance_score: importance,
+            action_required: actionRequired,
             ai_category: category,
           });
 
           if (insertErr) {
-            dbErrors.push(insertErr.message);
+            // Silently skip genuine duplicates — anything else is a real error
+            if (!insertErr.message.includes("duplicate key")) {
+              dbErrors.push(insertErr.message);
+            }
           } else {
             synced++;
           }
@@ -535,10 +714,10 @@ serve(async (req: Request) => {
       total,
       errors: dbErrors.slice(0, 10),
       message: synced > 0
-        ? `Synced ${synced} new emails from ${total} fetched`
+        ? `Synced ${synced} new emails${total > synced ? ` (sync again to fetch more)` : ''}`
         : dbErrors.length > 0
           ? `Sync complete but ${dbErrors.length} issues occurred`
-          : `No new emails to sync from ${total} in inbox`,
+          : `No new emails to sync`,
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

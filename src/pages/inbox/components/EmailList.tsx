@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { InboxEmail, SentEmail, FilterTab } from '@/hooks/useInbox';
+import { usePreferences } from '@/contexts/PreferencesContext';
 
 function formatTime(dateStr: string): string {
   const date = new Date(dateStr);
@@ -73,6 +74,8 @@ export function EmailList({
   onToggleStar,
   onMoveToFolder,
 }: EmailListProps) {
+  const { prefs } = usePreferences();
+  const rowPy = prefs.emailDensity === 'compact' ? 'py-2' : 'py-3';
   const [showBulkActions, setShowBulkActions] = useState(false);
   const isSentOrDraft = folder === 'Sent' || folder === 'Drafts';
   const displayItems = isSentOrDraft ? sentEmails : emails;
@@ -215,9 +218,7 @@ export function EmailList({
             </div>
             <p className="text-sm text-foreground-500 font-medium">No messages found</p>
             <p className="text-xs text-foreground-400 mt-1">
-              {folder === 'Inbox'
-                ? 'Get started with business email'
-                : `Your ${folder} folder is empty`}
+              {folder === 'Inbox' ? 'Get started with business email' : `Your ${folder} folder is empty`}
             </p>
           </div>
         )}
@@ -225,7 +226,7 @@ export function EmailList({
         {!isLoading && !error && isSentOrDraft && (sentEmails as any[]).map((sent) => (
           <div
             key={sent.id}
-            className={`flex items-center gap-3 px-4 py-3 border-b border-background-100 cursor-pointer transition-colors hover:bg-background-50`}
+            className={`flex items-center gap-3 px-4 ${rowPy} border-b border-background-100 cursor-pointer transition-colors hover:bg-background-50`}
           >
             <input
               type="checkbox"
@@ -265,7 +266,7 @@ export function EmailList({
             <div
               key={email.id}
               onClick={() => onSelectEmail(email)}
-              className={`flex items-center gap-3 px-4 py-3 border-b border-background-100 cursor-pointer transition-colors ${
+              className={`flex items-center gap-3 px-4 ${rowPy} border-b border-background-100 cursor-pointer transition-colors ${
                 isSelected ? 'bg-primary-50' : email.is_read ? 'bg-white hover:bg-background-50' : 'bg-background-50/70 hover:bg-background-100'
               }`}
             >
@@ -314,6 +315,11 @@ export function EmailList({
                   {email.ai_category && email.ai_category !== 'General' && (
                     <span className="text-xs px-1.5 py-0.5 rounded-full bg-secondary-100 text-secondary-700 font-medium whitespace-nowrap shrink-0">
                       {email.ai_category}
+                    </span>
+                  )}
+                  {prefs.showImportanceScore && email.importance_score !== null && email.importance_score >= 8 && (
+                    <span className="text-xs px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600 border border-rose-200 font-medium whitespace-nowrap shrink-0">
+                      P{email.importance_score}
                     </span>
                   )}
                   {email.action_required && (

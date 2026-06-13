@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
+import { usePreferences } from '@/contexts/PreferencesContext';
 
 export interface InboxEmail {
   id: string;
@@ -57,11 +58,19 @@ export type FolderFilter = 'Inbox' | 'Sent' | 'Drafts' | 'Spam' | 'Trash' | 'Sta
 export type FilterTab = 'all' | 'unread' | 'read' | 'starred';
 
 export function useInbox() {
+  const { prefs } = usePreferences();
   const [emails, setEmails] = useState<InboxEmail[]>([]);
   const [sentEmails, setSentEmails] = useState<SentEmail[]>([]);
   const [accounts, setAccounts] = useState<EmailAccountBrief[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedEmail, setSelectedEmail] = useState<InboxEmail | null>(null);
-  const [folder, setFolder] = useState<FolderFilter>('Inbox');
+  // initialise from the user's preferred default folder
+  const [folder, setFolder] = useState<FolderFilter>(() => {
+    const df = prefs.defaultFolder as FolderFilter;
+    return (['Inbox', 'Starred', 'Sent', 'Drafts', 'Spam', 'Trash'] as FolderFilter[]).includes(df)
+      ? df
+      : 'Inbox';
+  });
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -103,13 +112,19 @@ export function useInbox() {
       }
 
       if (folder === 'Sent' || folder === 'Drafts') {
-        const { data, error: err } = await supabase
+        let sentQuery = supabase
           .from('sent_emails')
           .select('*')
           .eq('user_id', user.id)
           .eq('is_draft', folder === 'Drafts')
           .order('sent_at', { ascending: false })
-          .limit(100);
+          .limit(prefs.emailsPerPage);
+
+        if (selectedAccountId) {
+          sentQuery = sentQuery.eq('account_id', selectedAccountId);
+        }
+
+        const { data, error: err } = await sentQuery;
 
         if (err) throw new Error(err.message);
         setSentEmails((data as SentEmail[]) || []);
@@ -122,8 +137,11 @@ export function useInbox() {
         .from('emails')
         .select('*')
         .eq('user_id', user.id)
-        .order('received_at', { ascending: false })
-        .limit(100);
+        .limit(prefs.emailsPerPage);
+
+      if (selectedAccountId) {
+        query = query.eq('account_id', selectedAccountId);
+      }
 
       if (folder === 'Starred') {
         query = query.eq('is_starred', true);
@@ -148,6 +166,8 @@ export function useInbox() {
         );
       }
 
+      query = query.order('received_at', { ascending: false });
+
       const { data, error: err } = await query;
 
       if (err) throw new Error(err.message);
@@ -161,7 +181,7 @@ export function useInbox() {
     } finally {
       setIsLoading(false);
     }
-  }, [folder, filterTab, searchQuery]);
+  }, [folder, filterTab, searchQuery, selectedAccountId, prefs.emailsPerPage]);
 
   useEffect(() => {
     setIsLoading(true);
@@ -171,7 +191,12 @@ export function useInbox() {
   }, [fetchEmails]);
 
   useEffect(() => {
-    fetchAccounts().then(setAccounts);
+    fetchAccounts().then((accts) => {
+      setAccounts(accts);
+      if (accts.length > 0) {
+        setSelectedAccountId((prev) => prev ?? accts[0].id);
+      }
+    });
   }, []);
 
   const markAsRead = useCallback(async (emailId: string) => {
@@ -219,10 +244,10 @@ export function useInbox() {
 
   const selectEmail = useCallback((email: InboxEmail) => {
     setSelectedEmail(email);
-    if (!email.is_read) {
+    if (!email.is_read && prefs.autoMarkRead) {
       markAsRead(email.id);
     }
-  }, [markAsRead]);
+  }, [markAsRead, prefs.autoMarkRead]);
 
   const toggleSelect = useCallback((emailId: string) => {
     setSelectedIds((prev) => {
@@ -377,6 +402,8 @@ export function useInbox() {
     emails,
     sentEmails,
     accounts,
+    selectedAccountId,
+    setSelectedAccountId,
     selectedEmail,
     folder,
     filterTab,

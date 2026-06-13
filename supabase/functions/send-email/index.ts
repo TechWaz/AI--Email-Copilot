@@ -8,13 +8,179 @@ const corsHeaders = {
   "Access-Control-Max-Age": "86400",
 };
 
+// Safe base64 for any size string — chunked to avoid max-call-stack on large bodies
 function base64Encode(str: string): string {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(str)));
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
-function buildSmtpCommand(cmd: string): Uint8Array {
-  const encoder = new TextEncoder();
-  return encoder.encode(cmd + "\r\n");
+// Raw bytes → base64 (for attachments already in binary)
+function base64EncodeBytes(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+// Wrap base64 at 76 chars as required by MIME spec
+function mimeB64(str: string): string {
+  const b64 = base64Encode(str);
+  return b64.match(/.{1,76}/g)?.join("\r\n") ?? b64;
+}
+
+function mimeB64Bytes(bytes: Uint8Array): string {
+  const b64 = base64EncodeBytes(bytes);
+  return b64.match(/.{1,76}/g)?.join("\r\n") ?? b64;
+}
+
+// Ensure every byte is written — conn.write() may do a partial write for large buffers
+async function writeAll(conn: Deno.TlsConn, data: Uint8Array): Promise<void> {
+  let offset = 0;
+  while (offset < data.length) {
+    offset += await conn.write(data.subarray(offset));
+  }
+}
+
+interface Attachment {
+  name: string;
+  type: string;
+  data: string; // base64 from browser FileReader
+}
+
+interface InlineImage {
+  cid: string;
+  type: string;
+  b64: string;
+}
+
+// Extract data: URI images from HTML, replace with cid: references
+function extractInlineImages(html: string): { html: string; images: InlineImage[] } {
+  const images: InlineImage[] = [];
+  const updated = html.replace(
+    /(<img[^>]*?)\ssrc="data:([^;]+);base64,([^"]*)"/gi,
+    (_match, prefix: string, mimeType: string, b64: string) => {
+      const cid = `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}@readdy`;
+      images.push({ cid, type: mimeType, b64 });
+      return `${prefix} src="cid:${cid}"`;
+    },
+  );
+  return { html: updated, images };
+}
+
+function buildAltPart(bodyText: string, htmlWithCids: string, altBoundary: string): string {
+  let part = `Content-Type: multipart/alternative; boundary="${altBoundary}"\r\n`;
+  part += `\r\n`;
+  part += `--${altBoundary}\r\n`;
+  part += `Content-Type: text/plain; charset="UTF-8"\r\n`;
+  part += `Content-Transfer-Encoding: base64\r\n`;
+  part += `\r\n`;
+  part += `${mimeB64(bodyText)}\r\n`;
+  part += `\r\n`;
+  part += `--${altBoundary}\r\n`;
+  part += `Content-Type: text/html; charset="UTF-8"\r\n`;
+  part += `Content-Transfer-Encoding: base64\r\n`;
+  part += `\r\n`;
+  part += `${mimeB64(htmlWithCids)}\r\n`;
+  part += `\r\n`;
+  part += `--${altBoundary}--\r\n`;
+  return part;
+}
+
+function buildRelatedPart(
+  bodyText: string,
+  htmlWithCids: string,
+  altBoundary: string,
+  relBoundary: string,
+  inlineImages: InlineImage[],
+): string {
+  let part = `Content-Type: multipart/related; boundary="${relBoundary}"\r\n`;
+  part += `\r\n`;
+  part += `--${relBoundary}\r\n`;
+  part += buildAltPart(bodyText, htmlWithCids, altBoundary);
+  for (const img of inlineImages) {
+    const imgBytes = Uint8Array.from(atob(img.b64), c => c.charCodeAt(0));
+    part += `\r\n--${relBoundary}\r\n`;
+    part += `Content-Type: ${img.type}\r\n`;
+    part += `Content-Transfer-Encoding: base64\r\n`;
+    part += `Content-Disposition: inline\r\n`;
+    part += `Content-ID: <${img.cid}>\r\n`;
+    part += `\r\n`;
+    part += `${mimeB64Bytes(imgBytes)}\r\n`;
+  }
+  part += `\r\n--${relBoundary}--\r\n`;
+  return part;
+}
+
+function buildMimeMessage(
+  email: string,
+  fromName: string,
+  to: string,
+  cc: string | undefined,
+  subject: string,
+  bodyHtml: string,
+  bodyText: string,
+  inReplyTo: string | undefined,
+  references: string | undefined,
+  msgId: string,
+  attachments: Attachment[],
+): string {
+  const { html: htmlWithCids, images: inlineImages } = extractInlineImages(bodyHtml);
+
+  const altBoundary = `alt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const relBoundary = `rel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const mixedBoundary = `mix_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const date = new Date().toUTCString();
+
+  const hasAttachments = attachments.length > 0;
+  const hasInlineImages = inlineImages.length > 0;
+
+  let msg = "";
+  msg += `From: ${fromName} <${email}>\r\n`;
+  msg += `To: ${to}\r\n`;
+  if (cc) msg += `Cc: ${cc}\r\n`;
+  msg += `Subject: =?UTF-8?B?${base64Encode(subject)}?=\r\n`;
+  msg += `Date: ${date}\r\n`;
+  msg += `Message-ID: ${msgId}\r\n`;
+  if (inReplyTo) msg += `In-Reply-To: <${inReplyTo}>\r\n`;
+  if (references) msg += `References: <${references}>\r\n`;
+  msg += `MIME-Version: 1.0\r\n`;
+
+  if (hasAttachments) {
+    // multipart/mixed wraps everything; body goes in first part
+    msg += `Content-Type: multipart/mixed; boundary="${mixedBoundary}"\r\n`;
+    msg += `\r\n`;
+    msg += `--${mixedBoundary}\r\n`;
+    if (hasInlineImages) {
+      msg += buildRelatedPart(bodyText, htmlWithCids, altBoundary, relBoundary, inlineImages);
+    } else {
+      msg += buildAltPart(bodyText, htmlWithCids, altBoundary);
+    }
+    for (const att of attachments) {
+      const attBytes = Uint8Array.from(atob(att.data), c => c.charCodeAt(0));
+      msg += `\r\n--${mixedBoundary}\r\n`;
+      msg += `Content-Type: ${att.type}; name="${att.name}"\r\n`;
+      msg += `Content-Transfer-Encoding: base64\r\n`;
+      msg += `Content-Disposition: attachment; filename="${att.name}"\r\n`;
+      msg += `\r\n`;
+      msg += `${mimeB64Bytes(attBytes)}\r\n`;
+    }
+    msg += `\r\n--${mixedBoundary}--\r\n`;
+  } else if (hasInlineImages) {
+    // multipart/related for HTML + inline images, no file attachments
+    msg += buildRelatedPart(bodyText, htmlWithCids, altBoundary, relBoundary, inlineImages);
+  } else {
+    // Plain text + HTML only
+    msg += buildAltPart(bodyText, htmlWithCids, altBoundary);
+  }
+
+  return msg;
 }
 
 async function smtpSend(
@@ -30,13 +196,22 @@ async function smtpSend(
   bodyHtml: string,
   bodyText: string,
   inReplyTo: string | undefined,
-  references: string | undefined
+  references: string | undefined,
+  attachments: Attachment[],
 ): Promise<string> {
-  console.log(`[SMTP] Connecting to ${host}:${port}...`);
-  const conn = await Deno.connectTls({ hostname: host, port });
-  console.log("[SMTP] TLS connection established");
+  // Build entire MIME message BEFORE opening the SMTP connection so there is
+  // zero delay between DATA 354 and writing the body — Hostinger times out otherwise.
+  const msgId = `<${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}@readdy>`;
+  const mimeMessage = buildMimeMessage(
+    email, fromName, to, cc, subject,
+    bodyHtml, bodyText, inReplyTo, references, msgId, attachments,
+  );
 
-  const decoder = new TextDecoder();
+  console.log(`[SMTP] Connecting to ${host}:${port}…`);
+  const conn = await Deno.connectTls({ hostname: host, port });
+
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
   const buf = new Uint8Array(65536);
   let bufLen = 0;
   let bufPos = 0;
@@ -45,17 +220,14 @@ async function smtpSend(
     while (true) {
       for (let i = bufPos; i < bufLen - 1; i++) {
         if (buf[i] === 13 && buf[i + 1] === 10) {
-          const line = decoder.decode(buf.slice(bufPos, i));
+          const line = dec.decode(buf.slice(bufPos, i));
           bufPos = i + 2;
           return line;
         }
       }
-      if (bufPos > 0 && bufPos < bufLen) {
+      if (bufPos > 0) {
         buf.copyWithin(0, bufPos, bufLen);
         bufLen -= bufPos;
-        bufPos = 0;
-      } else if (bufPos >= bufLen) {
-        bufLen = 0;
         bufPos = 0;
       }
       const n = await conn.read(buf.subarray(bufLen));
@@ -64,115 +236,69 @@ async function smtpSend(
     }
   }
 
-  async function sendCmd(cmd: string): Promise<string> {
-    await conn.write(buildSmtpCommand(cmd));
-    return await readLine();
+  // Reads a potentially multi-line SMTP response (250-... lines) and returns the last one
+  async function readResponse(): Promise<string> {
+    let line = await readLine();
+    while (line.length >= 4 && line[3] === "-") line = await readLine();
+    return line;
   }
 
-  // Read greeting
-  const greeting = await readLine();
-  console.log("[SMTP] Greeting:", greeting.slice(0, 150));
-  if (!greeting.startsWith("220")) {
-    throw new Error(`SMTP greeting unexpected: ${greeting.slice(0, 200)}`);
+  async function cmd(command: string): Promise<string> {
+    await writeAll(conn, enc.encode(command + "\r\n"));
+    return await readResponse();
   }
 
-  // EHLO
-  const ehloResp = await sendCmd("EHLO readdy");
-  console.log("[SMTP] EHLO:", ehloResp.slice(0, 150));
-
-  // AUTH LOGIN
-  const authResp = await sendCmd("AUTH LOGIN");
-  if (!authResp.startsWith("334")) {
-    throw new Error(`AUTH LOGIN not accepted: ${authResp.slice(0, 200)}`);
-  }
-
-  const userResp = await sendCmd(base64Encode(email));
-  if (!userResp.startsWith("334")) {
-    throw new Error(`Username rejected: ${userResp.slice(0, 200)}`);
-  }
-
-  const passResp = await sendCmd(base64Encode(password));
-  if (!passResp.startsWith("235")) {
-    throw new Error(`SMTP authentication failed: ${passResp.slice(0, 300)}. Check your email and password.`);
-  }
-  console.log("[SMTP] Authenticated successfully");
-
-  // MAIL FROM
-  const mailFromResp = await sendCmd(`MAIL FROM:<${email}>`);
-  if (!mailFromResp.startsWith("250")) {
-    throw new Error(`MAIL FROM failed: ${mailFromResp.slice(0, 200)}`);
-  }
-
-  // RCPT TO
-  const recipients = [to];
-  if (cc) cc.split(",").forEach((r) => recipients.push(r.trim()));
-  if (bcc) bcc.split(",").forEach((r) => recipients.push(r.trim()));
-
-  for (const rcpt of recipients) {
-    const rcptResp = await sendCmd(`RCPT TO:<${rcpt.trim()}>`);
-    if (!rcptResp.startsWith("250") && !rcptResp.startsWith("251")) {
-      console.warn(`[SMTP] RCPT TO ${rcpt} warning: ${rcptResp.slice(0, 150)}`);
-    }
-  }
-
-  // DATA
-  const dataResp = await sendCmd("DATA");
-  if (!dataResp.startsWith("354")) {
-    throw new Error(`DATA command failed: ${dataResp.slice(0, 200)}`);
-  }
-
-  // Build MIME message
-  const boundary = `----=_Readdy_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  const date = new Date().toUTCString();
-  const msgId = `<${Date.now()}-${Math.random().toString(36).slice(2, 10)}@readdy>`;
-
-  let headers = "";
-  headers += `From: ${fromName} <${email}>\r\n`;
-  headers += `To: ${to}\r\n`;
-  if (cc) headers += `Cc: ${cc}\r\n`;
-  headers += `Subject: =?UTF-8?B?${base64Encode(subject)}?=\r\n`;
-  headers += `Date: ${date}\r\n`;
-  headers += `Message-ID: ${msgId}\r\n`;
-  if (inReplyTo) headers += `In-Reply-To: <${inReplyTo}>\r\n`;
-  if (references) headers += `References: <${references}>\r\n`;
-  headers += `MIME-Version: 1.0\r\n`;
-  headers += `Content-Type: multipart/alternative; boundary="${boundary}"\r\n`;
-  headers += `\r\n`;
-
-  let body = "";
-  body += `--${boundary}\r\n`;
-  body += `Content-Type: text/plain; charset="UTF-8"\r\n`;
-  body += `Content-Transfer-Encoding: base64\r\n`;
-  body += `\r\n`;
-  body += `${base64Encode(bodyText)}\r\n`;
-  body += `\r\n`;
-  body += `--${boundary}\r\n`;
-  body += `Content-Type: text/html; charset="UTF-8"\r\n`;
-  body += `Content-Transfer-Encoding: base64\r\n`;
-  body += `\r\n`;
-  body += `${base64Encode(bodyHtml)}\r\n`;
-  body += `\r\n`;
-  body += `--${boundary}--\r\n`;
-
-  const message = headers + body;
-  const finalMsg = message + ".\r\n";
-
-  await conn.write(buildSmtpCommand(finalMsg));
-
-  const resp = await readLine();
-  console.log("[SMTP] Send response:", resp.slice(0, 150));
-
-  if (!resp.startsWith("250")) {
-    throw new Error(`Failed to send message: ${resp.slice(0, 300)}`);
-  }
-
-  // QUIT
   try {
-    await sendCmd("QUIT");
-  } catch { /* ignore */ }
+    const greeting = await readResponse();
+    if (!greeting.startsWith("220")) throw new Error(`Bad greeting: ${greeting.slice(0, 120)}`);
 
-  conn.close();
-  return msgId;
+    const ehlo = await cmd("EHLO mail.readdy.app");
+    console.log("[SMTP] EHLO:", ehlo.slice(0, 80));
+
+    // AUTH LOGIN
+    const authResp = await cmd("AUTH LOGIN");
+    if (!authResp.startsWith("334")) throw new Error(`AUTH LOGIN rejected: ${authResp.slice(0, 120)}`);
+
+    const userResp = await cmd(base64Encode(email));
+    if (!userResp.startsWith("334")) throw new Error(`Username rejected: ${userResp.slice(0, 120)}`);
+
+    const passResp = await cmd(base64Encode(password));
+    if (!passResp.startsWith("235")) throw new Error(`Authentication failed: ${passResp.slice(0, 200)}`);
+    console.log("[SMTP] Authenticated");
+
+    // MAIL FROM
+    const mailFrom = await cmd(`MAIL FROM:<${email}>`);
+    if (!mailFrom.startsWith("250")) throw new Error(`MAIL FROM rejected: ${mailFrom.slice(0, 120)}`);
+
+    // RCPT TO for every recipient
+    const recipients = [
+      to,
+      ...(cc?.split(",").map(r => r.trim()).filter(Boolean) ?? []),
+      ...(bcc?.split(",").map(r => r.trim()).filter(Boolean) ?? []),
+    ];
+    for (const rcpt of recipients) {
+      const r = await cmd(`RCPT TO:<${rcpt}>`);
+      if (!r.startsWith("250") && !r.startsWith("251")) {
+        console.warn(`[SMTP] RCPT TO <${rcpt}>: ${r.slice(0, 80)}`);
+      }
+    }
+
+    // DATA — write pre-built message immediately; use writeAll to guarantee
+    // every byte is transmitted (partial writes cause Hostinger's 421 timeout)
+    const dataResp = await cmd("DATA");
+    if (!dataResp.startsWith("354")) throw new Error(`DATA rejected: ${dataResp.slice(0, 120)}`);
+
+    await writeAll(conn, enc.encode(mimeMessage + ".\r\n"));
+
+    const sendResp = await readResponse();
+    if (!sendResp.startsWith("250")) throw new Error(`Failed to send message: ${sendResp.slice(0, 250)}`);
+    console.log("[SMTP] Sent OK");
+
+    try { await cmd("QUIT"); } catch { /* ignore */ }
+    return msgId;
+  } finally {
+    try { conn.close(); } catch { /* ignore */ }
+  }
 }
 
 serve(async (req: Request) => {
@@ -180,15 +306,13 @@ serve(async (req: Request) => {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
 
-  const requestId = crypto.randomUUID().slice(0, 8);
-  console.log(`[${requestId}] Send email request received`);
+  const rid = crypto.randomUUID().slice(0, 8);
 
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
       return new Response(JSON.stringify({ error: "Missing Authorization header" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
@@ -196,48 +320,39 @@ serve(async (req: Request) => {
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_ANON_KEY") ?? "",
-      { global: { headers: { Authorization: `Bearer ${token}` } } }
+      { global: { headers: { Authorization: `Bearer ${token}` } } },
     );
 
     const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
     if (authErr || !user) {
       return new Response(JSON.stringify({ error: "Invalid or expired token" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     let body: {
       accountId?: string;
-      to?: string;
-      cc?: string;
-      bcc?: string;
-      subject?: string;
-      bodyHtml?: string;
-      bodyText?: string;
-      inReplyTo?: string;
-      references?: string;
+      to?: string; cc?: string; bcc?: string;
+      subject?: string; bodyHtml?: string; bodyText?: string;
+      inReplyTo?: string; references?: string;
+      attachments?: Attachment[];
     } = {};
 
-    try {
-      body = await req.json();
-    } catch {
+    try { body = await req.json(); }
+    catch {
       return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const { accountId, to, cc, bcc, subject, bodyHtml, bodyText, inReplyTo, references } = body;
+    const { accountId, to, cc, bcc, subject, bodyHtml, bodyText, inReplyTo, references, attachments } = body;
 
-    if (!accountId || !to || !subject) {
-      return new Response(JSON.stringify({ error: "accountId, to, and subject are required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+    if (!accountId || !to) {
+      return new Response(JSON.stringify({ error: "accountId and to are required" }), {
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Look up account
     const { data: account, error: acctErr } = await supabase
       .from("email_accounts")
       .select("id, user_id, email_address, display_name, smtp_host, smtp_port, encrypted_password")
@@ -245,57 +360,42 @@ serve(async (req: Request) => {
       .single();
 
     if (acctErr || !account) {
-      return new Response(JSON.stringify({ error: "Account not found" }), {
-        status: 404,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      return new Response(JSON.stringify({ error: "Email account not found" }), {
+        status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-
     if (account.user_id !== user.id) {
       return new Response(JSON.stringify({ error: "Permission denied" }), {
-        status: 403,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const displayName = account.display_name || account.email_address.split("@")[0];
-    const html = bodyHtml || bodyText?.replace(/\n/g, "<br/>") || "";
+    const html = bodyHtml || bodyText?.replace(/\n/g, "<br>") || "";
     const text = bodyText || "";
 
-    console.log(`[${requestId}] Sending from ${account.email_address} to ${to} via ${account.smtp_host}:${account.smtp_port}`);
+    console.log(`[${rid}] Sending ${account.email_address} → ${to} via ${account.smtp_host}:${account.smtp_port}`);
 
     const msgId = await smtpSend(
-      account.smtp_host,
-      account.smtp_port,
-      account.email_address,
-      account.encrypted_password,
-      displayName,
-      to,
-      cc || undefined,
-      bcc || undefined,
-      subject,
-      html,
-      text,
-      inReplyTo || undefined,
-      references || undefined
+      account.smtp_host, account.smtp_port,
+      account.email_address, account.encrypted_password,
+      displayName, to, cc, bcc,
+      subject || "(No Subject)",
+      html, text,
+      inReplyTo, references,
+      attachments ?? [],
     );
 
-    console.log(`[${requestId}] Email sent successfully, Message-ID: ${msgId}`);
-
-    return new Response(JSON.stringify({
-      success: true,
-      message: "Email sent successfully",
-      messageId: msgId,
-    }), {
+    console.log(`[${rid}] OK msgId=${msgId}`);
+    return new Response(JSON.stringify({ success: true, message: "Email sent successfully", messageId: msgId }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
   } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : "Internal server error";
-    console.error(`[${requestId}] Send error:`, errorMsg);
-    return new Response(JSON.stringify({ error: errorMsg }), {
-      status: 502,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    const msg = err instanceof Error ? err.message : "Internal server error";
+    console.error(`[${rid}] Error:`, msg);
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { InboxEmail, EmailAccountBrief } from '@/hooks/useInbox';
+import { usePreferences } from '@/contexts/PreferencesContext';
 
 function formatFullDate(dateStr: string): string {
   const date = new Date(dateStr);
@@ -34,6 +35,7 @@ interface EmailDetailProps {
 }
 
 export function EmailDetail({ email, onReply, onDelete, onClose, onToggleStar, onMoveToFolder }: EmailDetailProps) {
+  const { prefs } = usePreferences();
   const [showOriginal, setShowOriginal] = useState(false);
 
   const displayHtml = email.body_html || null;
@@ -135,7 +137,7 @@ export function EmailDetail({ email, onReply, onDelete, onClose, onToggleStar, o
                 <span className="text-sm font-semibold text-foreground-950">
                   {email.sender_name || email.sender_email || 'Unknown'}
                 </span>
-                {email.importance_score && email.importance_score >= 8 && (
+                {prefs.showImportanceScore && email.importance_score !== null && email.importance_score >= 8 && (
                   <span className="text-xs px-1.5 py-0.5 rounded-full bg-rose-500/10 text-rose-600 border border-rose-200 font-medium">
                     High Priority
                   </span>
@@ -160,14 +162,14 @@ export function EmailDetail({ email, onReply, onDelete, onClose, onToggleStar, o
           </div>
 
           {/* Tags */}
-          {(email.ai_category || email.importance_score) && (
+          {(email.ai_category || (prefs.showImportanceScore && email.importance_score)) && (
             <div className="flex items-center gap-2 mb-4 flex-wrap">
               {email.ai_category && email.ai_category !== 'General' && (
                 <span className="text-xs px-2 py-1 rounded-full bg-secondary-100 text-secondary-700 font-medium">
                   {email.ai_category}
                 </span>
               )}
-              {email.importance_score && (
+              {prefs.showImportanceScore && email.importance_score && (
                 <span className="text-xs px-2 py-1 rounded-full bg-background-100 text-foreground-500">
                   Importance: {email.importance_score}/10
                 </span>
@@ -176,7 +178,7 @@ export function EmailDetail({ email, onReply, onDelete, onClose, onToggleStar, o
           )}
 
           {/* AI Summary */}
-          {email.ai_summary && (
+          {prefs.showAiSummary && email.ai_summary && (
             <div className="mb-4 p-3 rounded-lg bg-accent-50 border border-accent-200">
               <div className="flex items-center gap-1.5 mb-1">
                 <i className="ri-robot-2-line text-accent-600 text-sm w-4 h-4 flex items-center justify-center"></i>
