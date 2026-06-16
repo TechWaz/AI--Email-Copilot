@@ -1,11 +1,10 @@
-import { useMemo } from 'react';
 import type { FolderFilter } from '@/hooks/useInbox';
 
 interface FolderSidebarProps {
+  collapsed: boolean;
   activeFolder: FolderFilter;
   onFolderChange: (folder: FolderFilter) => void;
   onCompose: () => void;
-  emailCount: number;
   unreadCount: number;
   sentCount: number;
   draftCount: number;
@@ -17,137 +16,112 @@ interface FolderSidebarProps {
   storagePercent: number;
 }
 
-const FOLDERS: { id: FolderFilter; label: string; icon: string; iconSolid?: string }[] = [
-  { id: 'Inbox', label: 'Inbox', icon: 'ri-inbox-line', iconSolid: 'ri-inbox-fill' },
-  { id: 'Drafts', label: 'Drafts', icon: 'ri-draft-line', iconSolid: 'ri-draft-fill' },
-  { id: 'Sent', label: 'Sent', icon: 'ri-send-plane-line', iconSolid: 'ri-send-plane-fill' },
-  { id: 'Spam', label: 'Spam', icon: 'ri-spam-2-line', iconSolid: 'ri-spam-2-fill' },
-  { id: 'Trash', label: 'Trash', icon: 'ri-delete-bin-line', iconSolid: 'ri-delete-bin-fill' },
-  { id: 'Starred', label: 'Starred', icon: 'ri-star-line', iconSolid: 'ri-star-fill' },
+const MAIN_FOLDERS: { id: FolderFilter; label: string; icon: string; iconSolid: string }[] = [
+  { id: 'Inbox',   label: 'Inbox',   icon: 'ri-inbox-line',       iconSolid: 'ri-inbox-fill' },
+  { id: 'Starred', label: 'Starred', icon: 'ri-star-line',        iconSolid: 'ri-star-fill' },
+  { id: 'Sent',    label: 'Sent',    icon: 'ri-send-plane-line',  iconSolid: 'ri-send-plane-fill' },
+  { id: 'Drafts',  label: 'Drafts',  icon: 'ri-draft-line',       iconSolid: 'ri-draft-fill' },
+  { id: 'Spam',    label: 'Spam',    icon: 'ri-spam-2-line',      iconSolid: 'ri-spam-2-fill' },
+  { id: 'Trash',   label: 'Trash',   icon: 'ri-delete-bin-line',  iconSolid: 'ri-delete-bin-fill' },
 ];
 
 export function FolderSidebar({
-  activeFolder,
-  onFolderChange,
-  onCompose,
-  unreadCount,
-  sentCount,
-  draftCount,
-  spamCount,
-  trashCount,
-  starredCount,
-  storageUsed,
-  storageTotal,
-  storagePercent,
+  collapsed, activeFolder, onFolderChange, onCompose,
+  unreadCount, sentCount, draftCount, spamCount, trashCount, starredCount,
+  storageUsed, storageTotal, storagePercent,
 }: FolderSidebarProps) {
-  const countMap = useMemo(() => ({
-    Inbox: unreadCount,
-    Drafts: draftCount,
-    Sent: sentCount,
-    Spam: spamCount,
-    Trash: trashCount,
-    Starred: starredCount,
-  }), [unreadCount, sentCount, draftCount, spamCount, trashCount, starredCount]);
+  const countMap: Record<string, number> = {
+    Inbox: unreadCount, Starred: starredCount, Sent: sentCount,
+    Drafts: draftCount, Spam: spamCount, Trash: trashCount,
+  };
 
   return (
-    <aside className="w-[220px] shrink-0 flex flex-col h-full bg-background-50 border-r border-background-200">
-      {/* Logo */}
-      <div className="px-4 pt-5 pb-3 flex items-center gap-2">
-        <div className="w-7 h-7 flex items-center justify-center">
-          <i className="ri-mail-send-fill text-xl text-primary-600"></i>
-        </div>
-        <span className="text-sm font-bold text-foreground-950 tracking-tight">Mail</span>
-      </div>
-
-      {/* New message button */}
-      <div className="px-4 pb-4">
+    <aside
+      className="flex flex-col h-full shrink-0 overflow-hidden"
+      style={{ width: collapsed ? '72px' : '256px', transition: 'width 200ms ease' }}
+    >
+      {/* Compose button */}
+      <div className={`pt-3 pb-2 ${collapsed ? 'px-3' : 'px-4'}`}>
         <button
           onClick={onCompose}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-primary-500 text-white text-sm font-medium hover:bg-primary-600 transition-colors cursor-pointer whitespace-nowrap"
+          title="Compose"
+          className={`flex items-center gap-3 rounded-2xl transition-all cursor-pointer group ${
+            collapsed
+              ? 'w-12 h-12 justify-center bg-background-200 hover:bg-background-300 hover:shadow-md'
+              : 'px-5 py-4 bg-primary-100 hover:shadow-md hover:bg-primary-200'
+          }`}
         >
-          <i className="ri-edit-line text-sm w-4 h-4 flex items-center justify-center"></i>
-          New message
+          <i className="ri-pencil-line text-xl text-primary-800 group-hover:scale-110 transition-transform"></i>
+          {!collapsed && <span className="text-sm font-medium text-primary-900">Compose</span>}
         </button>
       </div>
 
-      {/* Folders */}
-      <nav className="flex-1 px-2 overflow-y-auto">
-        <div className="space-y-0.5">
-          {FOLDERS.map((f) => {
-            const isActive = activeFolder === f.id;
-            const count = countMap[f.id as keyof typeof countMap] || 0;
-            return (
-              <button
-                key={f.id}
-                onClick={() => onFolderChange(f.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-                  isActive
-                    ? 'bg-primary-100 text-primary-700 font-medium'
-                    : 'text-foreground-700 hover:bg-background-100'
-                }`}
-              >
-                <div className="w-5 h-5 flex items-center justify-center">
-                  <i className={`${isActive && f.iconSolid ? f.iconSolid : f.icon} text-base`}></i>
-                </div>
-                <span className="flex-1 text-left">{f.label}</span>
-                {count > 0 && (
-                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded-md ${
-                    isActive ? 'bg-primary-200 text-primary-800' : 'bg-background-200 text-foreground-500'
-                  }`}>
-                    {count}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+      {/* Folder navigation */}
+      <nav className="flex-1 overflow-y-auto overflow-x-hidden py-1">
+        {MAIN_FOLDERS.map(f => {
+          const isActive = activeFolder === f.id;
+          const count = countMap[f.id] ?? 0;
+          return (
+            <button
+              key={f.id}
+              onClick={() => onFolderChange(f.id)}
+              title={collapsed ? f.label : undefined}
+              className={`w-full flex items-center gap-3 py-1 my-0.5 transition-all cursor-pointer text-sm group ${
+                collapsed
+                  ? 'justify-center px-0 rounded-full mx-auto w-12 h-10'
+                  : 'pl-6 pr-4 rounded-r-full'
+              } ${
+                isActive
+                  ? 'bg-primary-100 font-semibold text-foreground-950'
+                  : 'text-foreground-700 hover:bg-black/5'
+              }`}
+            >
+              <i className={`text-xl shrink-0 ${isActive && f.iconSolid ? f.iconSolid : f.icon} ${isActive ? 'text-foreground-950' : 'text-foreground-600'}`}></i>
+              {!collapsed && (
+                <>
+                  <span className="flex-1 text-left">{f.label}</span>
+                  {count > 0 && (
+                    <span className={`text-xs font-semibold ml-auto ${isActive ? 'text-foreground-950' : 'text-foreground-700'}`}>
+                      {count > 999 ? '999+' : count}
+                    </span>
+                  )}
+                </>
+              )}
+              {collapsed && count > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-primary-500 text-white text-[9px] flex items-center justify-center font-bold">
+                  {count > 9 ? '9+' : count}
+                </span>
+              )}
+            </button>
+          );
+        })}
 
-        {/* Divider */}
-        <div className="my-3 border-t border-background-200 mx-2"></div>
-
-        {/* More items */}
-        <div className="space-y-0.5">
-          <button className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-foreground-700 hover:bg-background-100 transition-colors cursor-pointer">
-            <div className="w-5 h-5 flex items-center justify-center">
-              <i className="ri-folder-line text-base"></i>
-            </div>
-            <span className="flex-1 text-left">Folders</span>
-            <i className="ri-add-line text-sm text-foreground-400 w-4 h-4 flex items-center justify-center"></i>
-          </button>
-          <button className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-foreground-700 hover:bg-background-100 transition-colors cursor-pointer">
-            <div className="w-5 h-5 flex items-center justify-center">
-              <i className="ri-contacts-line text-base"></i>
-            </div>
-            <span className="flex-1 text-left">Contacts</span>
-          </button>
-        </div>
+        {!collapsed && (
+          <>
+            <div className="my-2 mx-4 border-t border-background-200"></div>
+            <button className="w-full flex items-center gap-3 pl-6 pr-4 py-1 my-0.5 rounded-r-full text-sm text-foreground-600 hover:bg-black/5 hover:text-foreground-900 transition-colors cursor-pointer">
+              <i className="ri-price-tag-3-line text-xl shrink-0"></i>
+              <span className="flex-1 text-left">Labels</span>
+              <i className="ri-add-line text-base text-foreground-400"></i>
+            </button>
+          </>
+        )}
       </nav>
 
-      {/* Storage */}
-      <div className="px-4 py-3 border-t border-background-200">
-        <div className="flex items-center justify-between text-xs text-foreground-500 mb-1.5">
-          <span>{storageUsed} / {storageTotal}</span>
-          <button className="text-primary-500 hover:text-primary-600 cursor-pointer whitespace-nowrap">Upgrade</button>
+      {/* Storage (only shown expanded) */}
+      {!collapsed && (
+        <div className="px-4 py-3 border-t border-background-100">
+          <div className="flex items-center justify-between text-xs text-foreground-400 mb-1.5">
+            <span>{storageUsed} of {storageTotal} used</span>
+          </div>
+          <div className="w-full h-1 rounded-full bg-background-200 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${storagePercent > 80 ? 'bg-rose-500' : 'bg-foreground-400'}`}
+              style={{ width: `${Math.min(storagePercent, 100).toFixed(2)}%` }}
+            />
+          </div>
         </div>
-        <div className="w-full h-1.5 rounded-full bg-background-200 overflow-hidden">
-          <div
-            className="h-full rounded-full bg-primary-500 transition-all"
-            style={{ width: `${Math.min(storagePercent, 100)}%` }}
-          ></div>
-        </div>
-      </div>
-
-      {/* Bottom actions */}
-      <div className="px-4 pb-4 space-y-2">
-        <button className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-foreground-500 hover:bg-background-100 transition-colors cursor-pointer">
-          <i className="ri-feedback-line text-sm w-4 h-4 flex items-center justify-center"></i>
-          Send feedback
-        </button>
-        <button className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-foreground-950 text-white text-xs font-medium hover:bg-foreground-800 transition-colors cursor-pointer">
-          <i className="ri-rocket-line text-sm w-4 h-4 flex items-center justify-center"></i>
-          Setup guide
-        </button>
-      </div>
+      )}
     </aside>
   );
 }
